@@ -1,0 +1,21 @@
+[package]
+name = "RenderProj"
+version = "0.1.0"
+edition = "2021"
+description = "A 3D rendering engine using Vulkan and Rust"
+authors = ["Cline"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+vulkano = "0.33.0"
+vulkano-shaders = "0.33.0"
+vulkano-win = "0.33.0"
+winit = "0.28.6"
+image = "0.24.6"
+nalgebra = "0.32.3"
+log = "0.4.19"
+env_logger = "0.10.0"
+anyhow = "1.0.72"
+bytemuck = { version = "1.13.1", features = ["derive"] }
+shaderc = "0.8.2"
