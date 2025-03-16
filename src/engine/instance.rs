@@ -5,7 +5,6 @@ use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo};
 use vulkano::instance::Instance;
 use vulkano::swapchain::Surface;
-use winit::window::Window;
 
 /// Selects the most suitable physical device (GPU) for our rendering engine
 pub fn select_physical_device(
@@ -86,20 +85,4 @@ pub fn create_logical_device(
 
     info!("Logical device created successfully");
     Ok((device, queue))
-}
-
-/// Creates a surface for rendering to a window
-pub fn create_surface(instance: Arc<Instance>, window: &Window) -> Result<Arc<Surface>> {
-    // Create a dummy window that we'll use to create the surface
-    // This is a workaround since we can't directly create an Arc<Window> from &Window
-    let event_loop = winit::event_loop::EventLoop::new();
-    let window_builder = winit::window::WindowBuilder::new()
-        .with_inner_size(window.inner_size());
-    let dummy_window = window_builder.build(&event_loop)?;
-    let dummy_window_arc = Arc::new(dummy_window);
-    
-    let surface = vulkano_win::create_surface_from_winit(dummy_window_arc, instance.clone())?;
-    
-    info!("Surface created successfully");
-    Ok(surface)
 }

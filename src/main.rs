@@ -4,7 +4,7 @@ use std::sync::Arc;
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Window, WindowBuilder};
+use winit::window::WindowBuilder;
 
 mod engine;
 mod shaders;
@@ -35,8 +35,14 @@ fn main() -> Result<()> {
         },
     )?;
 
-    // Create a renderer
-    let mut renderer = Renderer::new(instance, &window)?;
+    // Create the surface in main.rs
+    let surface = vulkano_win::create_surface_from_winit(
+        Arc::new(window),
+        instance.clone()
+    )?;
+
+    // Create a renderer, passing both instance and surface
+    let mut renderer = Renderer::new(instance, surface)?;
 
     // Run the event loop
     event_loop.run(move |event, _, control_flow| {

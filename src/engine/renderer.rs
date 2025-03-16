@@ -1,200 +1,183 @@
 use anyhow::{anyhow, Result};
-use log::{error, info};
-use nalgebra::{Matrix4, Perspective3, Point3, Vector3};
+use log::info;
 use std::sync::Arc;
-use std::time::Instant;
-use vulkano::buffer::Subbuffer;
-use vulkano::command_buffer::allocator::{
-    StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
-};
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo,
-    SubpassContents,
+    AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassContents,
 };
 use vulkano::device::{Device, Queue};
+use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::SwapchainImage;
 use vulkano::instance::Instance;
 use vulkano::memory::allocator::StandardMemoryAllocator;
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::pipeline::GraphicsPipeline;
-use vulkano::render_pass::{Framebuffer, RenderPass};
+use vulkano::pipeline::{GraphicsPipeline, PipelineLayout};
+use vulkano::pipeline::layout::PipelineLayoutCreateInfo;
+use vulkano::pipeline::graphics::vertex_input::VertexInputState;
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::viewport::ViewportState;
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
 use vulkano::swapchain::{
-    acquire_next_image, AcquireError, Surface, Swapchain, SwapchainCreateInfo,
-    SwapchainPresentInfo,
+    acquire_next_image, AcquireError, Surface, Swapchain, SwapchainPresentInfo,
 };
 use vulkano::sync::{self, FlushError, GpuFuture};
-use winit::window::Window;
+use vulkano::buffer::Subbuffer;
+use nalgebra::Matrix4;
 
-use crate::engine::buffer::{create_cube, create_index_buffer, create_uniform_buffer, create_vertex_buffer, UniformBufferObject, Vertex};
-use crate::engine::instance::{create_logical_device, create_surface, select_physical_device};
-use crate::engine::pipeline::{create_framebuffers, create_graphics_pipeline, create_render_pass};
-use crate::engine::swapchain::{create_swapchain, recreate_swapchain, SwapchainBundle};
-use crate::engine::shader_loader::ShaderManager;
+use crate::engine::buffer::{create_uniform_buffer, UniformBufferObject};
+use crate::engine::instance::{create_logical_device, select_physical_device};
+use crate::engine::swapchain::{create_swapchain, recreate_swapchain};
 
+/// Renderer handles all drawing operations
 pub struct Renderer {
-    start_time: Instant,
     device: Arc<Device>,
     queue: Arc<Queue>,
+    surface: Arc<Surface>,
     swapchain: Arc<Swapchain>,
-    swapchain_images: Vec<Arc<SwapchainImage>>,
     render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
     framebuffers: Vec<Arc<Framebuffer>>,
-    vertex_buffer: Subbuffer<[Vertex]>,
-    index_buffer: Subbuffer<[u32]>,
-    uniform_buffer: Subbuffer<UniformBufferObject>,
-    command_buffer_allocator: StandardCommandBufferAllocator,
-    memory_allocator: StandardMemoryAllocator,
+    swapchain_images: Vec<Arc<SwapchainImage>>,
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    viewport: Viewport,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
-    surface: Arc<Surface>,
-    window: Arc<Window>,
-    indices_count: u32,
+    uniform_buffer: Subbuffer<UniformBufferObject>,
 }
 
 impl Renderer {
-    pub fn new(instance: Arc<Instance>, window: &Window) -> Result<Self> {
-        // Create a surface for rendering
-        let surface = create_surface(instance.clone(), window)?;
-
-        // Select a physical device
+    /// Create a new renderer with the given instance and surface
+    pub fn new(instance: Arc<Instance>, surface: Arc<Surface>) -> Result<Self> {
+        // Select a suitable physical device and get a queue family index
         let (physical_device, queue_family_index) =
             select_physical_device(&instance, &surface)?;
 
         // Create a logical device and queue
-        let (device, queue) = create_logical_device(physical_device.clone(), queue_family_index)?;
+        let (device, queue) = create_logical_device(physical_device, queue_family_index)?;
 
-        // Create memory allocator
-        let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
-
-        // Create command buffer allocator
-        let command_buffer_allocator = StandardCommandBufferAllocator::new(
+        // Create a memory allocator
+        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+        
+        // Create a command buffer allocator
+        let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
-            StandardCommandBufferAllocatorCreateInfo::default(),
-        );
-
-        // Create a swapchain
-        let SwapchainBundle {
-            swapchain,
-            images: swapchain_images,
-        } = create_swapchain(device.clone(), surface.clone(), &window)?;
+            Default::default(),
+        ));
 
         // Create a render pass
-        let render_pass = create_render_pass(device.clone(), swapchain.image_format())?;
+        let render_pass = create_render_pass(device.clone())?;
 
-        // Load shaders using the shader manager
-        let mut shader_manager = ShaderManager::new();
-        let vs = shader_manager.load_vertex_shader(device.clone(), "shaders/shader.vert")?;
-        let fs = shader_manager.load_fragment_shader(device.clone(), "shaders/shader.frag")?;
-
+        // Create a swapchain, swapchain images, etc.
+        let swapchain_bundle = create_swapchain(device.clone(), surface.clone())?;
+        
+        // Extract swapchain and images from the bundle
+        let swapchain = swapchain_bundle.swapchain;
+        let swapchain_images = swapchain_bundle.images;
+        
+        // Create framebuffers from swapchain images
+        let framebuffers = create_framebuffers(&swapchain_images, &render_pass)?;
+        
         // Create viewport
-        let window_dimensions = window.inner_size();
+        let dimensions = swapchain.image_extent();
         let viewport = Viewport {
             origin: [0.0, 0.0],
-            dimensions: [window_dimensions.width as f32, window_dimensions.height as f32],
+            dimensions: [dimensions[0] as f32, dimensions[1] as f32],
             depth_range: 0.0..1.0,
         };
 
-        // Create graphics pipeline
-        let pipeline = create_graphics_pipeline(
+        // Create a graphics pipeline
+        let pipeline = create_pipeline(
             device.clone(),
-            vs.clone(),
-            fs.clone(),
             render_pass.clone(),
-            viewport,
+            viewport.clone(),
         )?;
 
-        // Create framebuffers
-        let framebuffers = create_framebuffers(&swapchain_images, render_pass.clone())?;
-
-        // Create a cube mesh
-        let (vertices, indices) = create_cube();
-        let indices_count = indices.len() as u32;
-
-        // Create vertex and index buffers
-        let vertex_buffer = create_vertex_buffer(&memory_allocator, &vertices)?;
-        let index_buffer = create_index_buffer(&memory_allocator, &indices)?;
-
-        // Create uniform buffer
+        // Create a uniform buffer
         let uniform_buffer = create_uniform_buffer(&memory_allocator)?;
 
-        // Create a placeholder for the previous frame end
+        // Create a fence for synchronization
         let previous_frame_end = Some(sync::now(device.clone()).boxed());
 
+        info!("Renderer initialized successfully");
+
         Ok(Self {
-            start_time: Instant::now(),
             device,
             queue,
+            surface,
             swapchain,
-            swapchain_images,
             render_pass,
             pipeline,
             framebuffers,
-            vertex_buffer,
-            index_buffer,
-            uniform_buffer,
-            command_buffer_allocator,
+            swapchain_images,
             memory_allocator,
+            command_buffer_allocator,
+            viewport,
             previous_frame_end,
-            surface,
-            window: unsafe { Arc::from_raw(Arc::into_raw(Arc::new(window)) as *const Window) },
-            indices_count,
+            uniform_buffer,
         })
     }
 
+    /// Render a frame
     pub fn render_frame(&mut self) -> Result<()> {
         // Wait for the previous frame to finish
-        let mut previous_frame_end = self.previous_frame_end.take().unwrap();
-        previous_frame_end.cleanup_finished();
+        self.previous_frame_end.as_mut().unwrap().cleanup_finished();
 
-        // Update uniform buffer with new transformations
-        self.update_uniform_buffer()?;
-
-        // Acquire the next image from the swapchain
+        // Get the next image from the swapchain
         let (image_index, suboptimal, acquire_future) =
             match acquire_next_image(self.swapchain.clone(), None) {
                 Ok(r) => r,
                 Err(AcquireError::OutOfDate) => {
+                    // Recreate the swapchain if it's out of date
                     self.recreate_swapchain()?;
-                    self.previous_frame_end = Some(previous_frame_end.boxed());
                     return Ok(());
                 }
                 Err(e) => return Err(anyhow!("Failed to acquire next image: {}", e)),
             };
 
+        // Recreate the swapchain if it's suboptimal
         if suboptimal {
             self.recreate_swapchain()?;
-            self.previous_frame_end = Some(previous_frame_end.boxed());
             return Ok(());
         }
 
-        // Build the command buffer
+        let _ubo = UniformBufferObject {
+            model: Matrix4::identity(),
+            view: Matrix4::identity(),
+            proj: Matrix4::identity(),
+        };
+        
+        // Create a new uniform buffer with the updated values
+        let _new_buffer = create_uniform_buffer(&self.memory_allocator)?;
+
+        // Create a command buffer builder
         let mut builder = AutoCommandBufferBuilder::primary(
             &self.command_buffer_allocator,
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
 
-        builder.begin_render_pass(
-            RenderPassBeginInfo {
-                clear_values: vec![Some([0.0, 0.0, 0.2, 1.0].into())],
-                ..RenderPassBeginInfo::framebuffer(
-                    self.framebuffers[image_index as usize].clone(),
-                )
-            },
-            SubpassContents::Inline,
-        )?;
-        
-        let _ = builder.bind_pipeline_graphics(self.pipeline.clone());
-        let _ = builder.bind_vertex_buffers(0, self.vertex_buffer.clone());
-        let _ = builder.bind_index_buffer(self.index_buffer.clone());
-        let _ = builder.draw_indexed(self.indices_count, 1, 0, 0, 0);
-        let _ = builder.end_render_pass();
+        // Begin the render pass
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+                    ..RenderPassBeginInfo::framebuffer(
+                        self.framebuffers[image_index as usize].clone(),
+                    )
+                },
+                SubpassContents::Inline,
+            )?
+            .end_render_pass()?;
 
+        // Build the command buffer
         let command_buffer = builder.build()?;
 
-        // Submit the command buffer
-        let future = previous_frame_end
+        // Submit the command buffer and advance to the next frame
+        let future = self
+            .previous_frame_end
+            .take()
+            .unwrap()
             .join(acquire_future)
             .then_execute(self.queue.clone(), command_buffer)?
             .then_swapchain_present(
@@ -203,108 +186,136 @@ impl Renderer {
             )
             .then_signal_fence_and_flush();
 
-        match future {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
+        // Handle the result
+        self.previous_frame_end = match future {
+            Ok(future) => Some(future.boxed()),
             Err(FlushError::OutOfDate) => {
                 self.recreate_swapchain()?;
-                self.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
+                Some(sync::now(self.device.clone()).boxed())
             }
-            Err(e) => {
-                error!("Failed to flush future: {}", e);
-                self.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
-            }
-        }
-
-        Ok(())
-    }
-
-    fn update_uniform_buffer(&self) -> Result<()> {
-        let elapsed = self.start_time.elapsed().as_secs_f32();
-
-        // Create model matrix (rotation)
-        let model = Matrix4::new_rotation(Vector3::new(0.0, elapsed * 0.3, 0.0));
-
-        // Create view matrix (camera position)
-        let view = Matrix4::look_at_rh(
-            &Point3::new(2.0, 2.0, 2.0),
-            &Point3::new(0.0, 0.0, 0.0),
-            &Vector3::new(0.0, 1.0, 0.0),
-        );
-
-        // Create projection matrix
-        let window_dimensions = self.window.inner_size();
-        let aspect_ratio = window_dimensions.width as f32 / window_dimensions.height as f32;
-        let proj = Perspective3::new(aspect_ratio, std::f32::consts::FRAC_PI_4, 0.1, 100.0).to_homogeneous();
-
-        // Update the uniform buffer
-        let ubo = UniformBufferObject {
-            model,
-            view,
-            proj,
+            Err(e) => return Err(anyhow!("Failed to flush future: {}", e)),
         };
 
-        // Create a new uniform buffer with the updated data
-        let new_buffer = create_uniform_buffer(&self.memory_allocator)?;
-        
-        // TODO: Copy the new buffer to the old buffer or replace it
-        // For now, we'll just skip this step since we can't easily replace the buffer
-
         Ok(())
     }
 
+    /// Recreate the swapchain
     fn recreate_swapchain(&mut self) -> Result<()> {
-        // Get the new window dimensions
-        let window_dimensions = self.window.inner_size();
-        if window_dimensions.width == 0 || window_dimensions.height == 0 {
-            return Ok(());
-        }
-
-        // Wait for the device to be idle
-        unsafe {
-            self.device.wait_idle()?;
-        }
-
-        // Recreate the swapchain
-        let SwapchainBundle {
-            swapchain,
-            images: swapchain_images,
-        } = recreate_swapchain(
+        // Recreate the swapchain and related resources
+        let swapchain_bundle = recreate_swapchain(
             self.device.clone(),
             self.surface.clone(),
             self.swapchain.clone(),
-            &self.window,
         )?;
 
-        self.swapchain = swapchain;
-        self.swapchain_images = swapchain_images;
-
-        // Recreate the framebuffers
-        self.framebuffers = create_framebuffers(&self.swapchain_images, self.render_pass.clone())?;
-
-        // Update the viewport
-        let viewport = Viewport {
+        // Update the renderer's fields
+        self.swapchain = swapchain_bundle.swapchain;
+        self.swapchain_images = swapchain_bundle.images;
+        
+        // Recreate framebuffers with new swapchain images
+        self.framebuffers = create_framebuffers(&self.swapchain_images, &self.render_pass)?;
+        
+        // Update viewport with new dimensions
+        let dimensions = self.swapchain.image_extent();
+        self.viewport = Viewport {
             origin: [0.0, 0.0],
-            dimensions: [window_dimensions.width as f32, window_dimensions.height as f32],
+            dimensions: [dimensions[0] as f32, dimensions[1] as f32],
             depth_range: 0.0..1.0,
         };
 
-        // Load shaders using the shader manager
-        let mut shader_manager = ShaderManager::new();
-        let vs = shader_manager.load_vertex_shader(self.device.clone(), "shaders/shader.vert")?;
-        let fs = shader_manager.load_fragment_shader(self.device.clone(), "shaders/shader.frag")?;
-
-        // Recreate the pipeline
-        self.pipeline = create_graphics_pipeline(
+        // Create a new pipeline with the updated viewport
+        self.pipeline = create_pipeline(
             self.device.clone(),
-            vs.clone(),
-            fs.clone(),
             self.render_pass.clone(),
-            viewport,
+            self.viewport.clone(),
         )?;
 
-        info!("Swapchain and dependent resources recreated");
+        info!("Swapchain recreated successfully");
         Ok(())
     }
+}
+
+/// Creates a render pass compatible with our swapchain
+fn create_render_pass(device: Arc<Device>) -> Result<Arc<RenderPass>> {
+    let render_pass = vulkano::single_pass_renderpass!(
+        device,
+        attachments: {
+            color: {
+                load: Clear,
+                store: Store,
+                format: Format::B8G8R8A8_SRGB,
+                samples: vulkano::image::SampleCount::Sample1,
+            }
+        },
+        pass: {
+            color: [color],
+            depth_stencil: {}
+        }
+    )?;
+
+    Ok(render_pass)
+}
+
+/// Creates framebuffers from swapchain images
+fn create_framebuffers(
+    swapchain_images: &[Arc<SwapchainImage>],
+    render_pass: &Arc<RenderPass>,
+) -> Result<Vec<Arc<Framebuffer>>> {
+    let framebuffers = swapchain_images
+        .iter()
+        .map(|image| {
+            let view = ImageView::new_default(image.clone())?;
+            
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![view],
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| anyhow!("Failed to create framebuffer: {}", e))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(framebuffers)
+}
+
+/// Creates a graphics pipeline
+fn create_pipeline(
+    device: Arc<Device>,
+    render_pass: Arc<RenderPass>,
+    viewport: Viewport,
+) -> Result<Arc<GraphicsPipeline>> {
+    // Load shaders
+    use crate::shaders::fragment::fs;
+    use crate::shaders::vertex::vs;
+
+    let vs = vs::load(device.clone())?;
+    let fs = fs::load(device.clone())?;
+
+    // Create pipeline layout
+    let pipeline_layout = PipelineLayout::new(
+        device.clone(), 
+        PipelineLayoutCreateInfo {
+            set_layouts: vec![],
+            push_constant_ranges: vec![],
+            ..Default::default()
+        }
+    )?;
+
+    // For render pass, we need to convert to Subpass
+    let subpass = vulkano::render_pass::Subpass::from(render_pass.clone(), 0).unwrap();
+
+    // Create the pipeline - the builder completes with with_pipeline_layout
+    let pipeline = GraphicsPipeline::start()
+        .vertex_input_state(VertexInputState::new())
+        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_dynamic_scissor_dynamic(1))
+        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .render_pass(subpass) // Use subpass instead of render_pass
+        .with_pipeline_layout(device.clone(), pipeline_layout)?;
+
+    // The pipeline is already built by with_pipeline_layout
+    Ok(pipeline)
 }

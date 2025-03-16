@@ -3,11 +3,10 @@ use log::info;
 use std::sync::Arc;
 use vulkano::device::Device;
 use vulkano::format::Format;
-use vulkano::image::{ImageUsage, SwapchainImage};
+use vulkano::image::{SwapchainImage};
 use vulkano::swapchain::{
-    AcquireError, Surface, Swapchain, SwapchainCreateInfo, SwapchainCreationError,
+    Surface, Swapchain, SwapchainCreateInfo,
 };
-use winit::window::Window;
 
 pub struct SwapchainBundle {
     pub swapchain: Arc<Swapchain>,
@@ -18,7 +17,6 @@ pub struct SwapchainBundle {
 pub fn create_swapchain(
     device: Arc<Device>,
     surface: Arc<Surface>,
-    window: &Window,
 ) -> Result<SwapchainBundle> {
     let surface_capabilities = device
         .physical_device()
@@ -28,7 +26,7 @@ pub fn create_swapchain(
     let surface_formats = device
         .physical_device()
         .surface_formats(&surface, Default::default())?;
-    
+        
     let format = surface_formats
         .iter()
         .find(|(format, color_space)| {
@@ -37,8 +35,8 @@ pub fn create_swapchain(
         .map(|(format, color_space)| (*format, *color_space))
         .unwrap_or_else(|| (surface_formats[0].0, surface_formats[0].1));
 
-    // Get the window dimensions
-    let window_dimensions = window.inner_size();
+    // Get dimensions from surface capabilities
+    let dimensions = surface_capabilities.current_extent.unwrap_or([800, 600]);
 
     // Create the swapchain and its images
     let (swapchain, images) = Swapchain::new(
@@ -48,7 +46,7 @@ pub fn create_swapchain(
             min_image_count: surface_capabilities.min_image_count.max(2),
             image_format: Some(format.0),
             image_color_space: format.1,
-            image_extent: [window_dimensions.width, window_dimensions.height],
+            image_extent: dimensions,
             image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
             composite_alpha: vulkano::swapchain::CompositeAlpha::Opaque,
             ..Default::default()
@@ -69,16 +67,23 @@ pub fn recreate_swapchain(
     device: Arc<Device>,
     surface: Arc<Surface>,
     old_swapchain: Arc<Swapchain>,
-    window: &Window,
 ) -> Result<SwapchainBundle> {
-    let window_dimensions = window.inner_size();
+    // Get dimensions from surface capabilities 
+    let surface_capabilities = device
+        .physical_device()
+        .surface_capabilities(&surface, Default::default())?;
     
+    let dimensions = surface_capabilities.current_extent.unwrap_or_else(|| {
+        // If current_extent is None, use the dimensions from the old swapchain
+        old_swapchain.image_extent()
+    });
+        
     let (swapchain, images) = old_swapchain.recreate(SwapchainCreateInfo {
-        image_extent: [window_dimensions.width, window_dimensions.height],
+        image_extent: dimensions,
         ..old_swapchain.create_info()
     })?;
 
     info!("Swapchain recreated with {} images", images.len());
-    
+        
     Ok(SwapchainBundle { swapchain, images })
 }
