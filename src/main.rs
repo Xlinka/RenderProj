@@ -26,10 +26,11 @@ fn main() -> Result<()> {
 
     // Create a Vulkan instance
     let library = vulkano::VulkanLibrary::new().expect("No local Vulkan library");
+    let enabled_extensions = vulkano_win::required_extensions(&library);
     let instance = Instance::new(
-        library,
+        library.clone(),
         InstanceCreateInfo {
-            enabled_extensions: vulkano_win::required_extensions(&library),
+            enabled_extensions,
             ..Default::default()
         },
     )?;
